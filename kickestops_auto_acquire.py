@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""KickestOps Unified Acquisition v0.2.0-dev.
+"""KickestOps Unified Acquisition.
 
 DEVELOP/STAGING acquisition only. One entrypoint for:
 - official Kickest/Fantaking schedule, full market and saved-entry roster preview;
@@ -23,7 +23,7 @@ ALLOWED_API_HOST = "fantaking-api.dunkest.com"
 SCHEDULE_ID = 45
 PLAYERS_LIST_ID = {"2026-27": 45}
 MATCHDAY_ANCHOR = {"2026-27": (3, 1431)}
-ENTRY_MAP = {"2026-27": {"KICK-A-2627": 2656657, "KICK-B-2627": 2656733}}
+ENTRY_MAP = {"2026-27": {"KICK-A-2627": 2656657, "KICK-B-2627": 2656733, "KICK-C-2627": 2846458}}
 EXPECTED_PLAYER_IDS = {
     "2026-27": {
         "KICK-A-2627": [1177,9914,834,919,4801,3546,1038,3736,1066,4309,3538,9015,8910,840,870,3667],
