@@ -4,11 +4,11 @@ on:
   workflow_dispatch:
     inputs:
       mode:
-        description: "auto | pre-gw | live-turn | opta"
+        description: "auto | pre-gw | live-turn | opta | opta-full"
         required: true
         default: "auto"
         type: choice
-        options: [auto, pre-gw, live-turn, opta]
+        options: [auto, pre-gw, live-turn, opta, opta-full]
       gw:
         description: "GW number or auto"
         required: true
@@ -31,33 +31,15 @@ concurrency:
 jobs:
   acquire:
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 15
     env:
       KICKEST_BEARER: ${{ secrets.KICKEST_BEARER }}
-      GITHUB_TOKEN: ${{ github.token }}
+      GH_TOKEN: ${{ github.token }}
       PYTHONUNBUFFERED: "1"
+      PIP_DISABLE_PIP_VERSION_CHECK: "1"
 
     steps:
       - uses: actions/checkout@v4
-
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-          cache: pip
-          cache-dependency-path: requirements-acquisition.txt
-
-      - name: Install acquisition dependencies
-        run: |
-          python -m pip install --upgrade pip
-          python -m pip install -r requirements-acquisition.txt
-
-      - name: Restore acquisition cache
-        uses: actions/cache@v4
-        with:
-          path: .kickestops-cache
-          key: kickestops-acquisition-${{ runner.os }}-${{ github.run_id }}
-          restore-keys: |
-            kickestops-acquisition-${{ runner.os }}-
 
       - name: Resolve run request
         id: params
@@ -74,7 +56,7 @@ jobs:
           fi
 
           case "$mode" in
-            auto|pre-gw|live-turn|opta) ;;
+            auto|pre-gw|live-turn|opta|opta-full) ;;
             *) echo "Invalid mode: $mode" >&2; exit 2 ;;
           esac
 
@@ -100,10 +82,21 @@ jobs:
           echo "gw=$gw" >> "$GITHUB_OUTPUT"
           echo "horizon=$horizon" >> "$GITHUB_OUTPUT"
 
-      - name: Verify unified entrypoint
-        run: python kickestops_auto_acquire.py inspect
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: requirements-acquisition.txt
 
-      - name: Run unified acquisition
+      - name: Install dependencies
+        run: python -m pip install -r requirements-acquisition.txt
+
+      - name: Validate entrypoint
+        run: |
+          python -m py_compile kickestops_auto_acquire.py
+          python kickestops_auto_acquire.py inspect
+
+      - name: Run acquisition
         run: |
           python kickestops_auto_acquire.py "${{ steps.params.outputs.mode }}" \
             --gw "${{ steps.params.outputs.gw }}" \
@@ -112,7 +105,16 @@ jobs:
             --output-dir artifacts \
             --cache-dir .kickestops-cache
 
-      - name: Upload immutable staging bundle
+      - name: Show run manifest
+        if: always()
+        run: |
+          if [ -f artifacts/AUTO_ACQUISITION_RUN.json ]; then
+            cat artifacts/AUTO_ACQUISITION_RUN.json
+            echo "### KickestOps acquisition" >> "$GITHUB_STEP_SUMMARY"
+            cat artifacts/AUTO_ACQUISITION_RUN.json >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Upload staging bundle
         if: always()
         uses: actions/upload-artifact@v4
         with:
@@ -120,3 +122,4 @@ jobs:
           path: artifacts/
           if-no-files-found: warn
           retention-days: 30
+          compression-level: 1
