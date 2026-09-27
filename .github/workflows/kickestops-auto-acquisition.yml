@@ -32,12 +32,6 @@ jobs:
   acquire:
     runs-on: ubuntu-22.04
     timeout-minutes: 15
-    env:
-      KICKEST_BEARER: ${{ secrets.KICKEST_BEARER }}
-      GH_TOKEN: ${{ github.token }}
-      PYTHONUNBUFFERED: "1"
-      PIP_DISABLE_PIP_VERSION_CHECK: "1"
-
     steps:
       - uses: actions/checkout@v4
 
@@ -97,6 +91,10 @@ jobs:
           python kickestops_auto_acquire.py inspect
 
       - name: Run acquisition
+        env:
+          KICKEST_BEARER: ${{ secrets.KICKEST_BEARER }}
+          GH_TOKEN: ${{ github.token }}
+          PYTHONUNBUFFERED: "1"
         run: |
           python kickestops_auto_acquire.py "${{ steps.params.outputs.mode }}" \
             --gw "${{ steps.params.outputs.gw }}" \
