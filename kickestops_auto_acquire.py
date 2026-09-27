@@ -154,7 +154,7 @@ def roster(bearer: str, entry_id: str, team_id: int, matchday_id: int, rsummary:
         rows.append({"entry_id":entry_id,"fantasy_team_id":team_id,"capture_utc":cap,"player_id":p.get("id"),"player_name":" ".join(x for x in [str(p.get("first_name") or "").strip(),str(p.get("last_name") or "").strip()] if x),"position_id":pos.get("id"),"position_name":pos.get("name"),"team_id":club.get("id"),"team_name":club.get("name"),"opponent_id":opp.get("id"),"opponent_name":opp.get("name"),"quotation_api":p.get("quotation"),"pts_api":p.get("pts"),"active":p.get("active"),"court_position":cp,"is_captain":p.get("is_captain"),"captain_multiplier":p.get("captain_multiplier"),"round_number":rn,"round_state":rs,"match_live":p.get("match_live"),"score_state":score})
     return t,rows
 
-def acquire_kickest(out: Path, season: str, gw: int, horizon: int) -> dict[str,Any]:
+def acquire_kickest(out: Path, season: str, gw: int, horizon: int, include_roster: bool) -> dict[str,Any]:
     b=token(); mid,sobj,scap=resolve_matchday(b,season,gw); raw=out/"raw"; normdir=out/"normalized"; raw.mkdir(parents=True,exist_ok=True); normdir.mkdir(parents=True,exist_ok=True)
     write_json(raw/f"GW{gw:02d}_schedule.json",{"captured_at_utc":scap,"response":sobj})
     srows,rsummary=schedule_rows(sobj); write_csv(normdir/"schedule_matches.csv",srows); bnd=boundary(rsummary)
@@ -169,17 +169,20 @@ def acquire_kickest(out: Path, season: str, gw: int, horizon: int) -> dict[str,A
     market,pqa=market_entities(b,plist,mid); coaches=[r for r in market if int(r.get("position_id") or -1)==13]; players=[r for r in market if int(r.get("position_id") or -1)!=13]
     write_csv(normdir/"market_players.csv",players); write_csv(normdir/"market_coaches.csv",coaches); write_csv(normdir/"availability_signals.csv",players,["captured_at_utc","capture_page","kickest_id","player_name","team_id","position_id","active","probability_of_playing","is_injured","started_from_bench"])
     teams=[]; roster_rows=[]; qchecks=[]
-    for eid,tid in ENTRY_MAP.get(season,{}).items():
-        t,rr=roster(b,eid,tid,mid,rsummary); teams.append(t); roster_rows+=rr
-        actual={int(x["player_id"]) for x in rr if x.get("player_id") is not None}; expected=set(EXPECTED_PLAYER_IDS.get(season,{}).get(eid,[]))
-        qchecks.append({"check":f"{eid}:roster_count_16","pass":len(rr)==16,"actual":len(rr)})
-        if expected: qchecks.append({"check":f"{eid}:roster_identity","pass":actual==expected,"missing":sorted(expected-actual),"unexpected":sorted(actual-expected)})
-    write_csv(normdir/"roster_teams.csv",teams); write_csv(normdir/"roster_players.csv",roster_rows)
+    if include_roster:
+        for eid,tid in ENTRY_MAP.get(season,{}).items():
+            t,rr=roster(b,eid,tid,mid,rsummary); teams.append(t); roster_rows+=rr
+            actual={int(x["player_id"]) for x in rr if x.get("player_id") is not None}; expected=set(EXPECTED_PLAYER_IDS.get(season,{}).get(eid,[]))
+            qchecks.append({"check":f"{eid}:roster_count_16","pass":len(rr)==16,"actual":len(rr)})
+            if expected: qchecks.append({"check":f"{eid}:roster_identity","pass":actual==expected,"missing":sorted(expected-actual),"unexpected":sorted(actual-expected)})
+        write_csv(normdir/"roster_teams.csv",teams); write_csv(normdir/"roster_players.csv",roster_rows)
+    else:
+        qchecks.append({"check":"roster_preview_required_only_for_live_turn","pass":True})
     hard=bool(players) and pqa["complete"] and all(c["pass"] for c in qchecks)
     qa={"status":"PASS_STAGING" if hard else "FAIL_STAGING","hard_pass":hard,"checks":qchecks,"market":pqa,"boundary":bnd}
     write_json(out/"QA.json",qa); write_json(out/"TURN_STATE.json",{"status":"STAGING / DEVELOPMENT","season":season,"gw":gw,"matchday_id":mid,"captured_at_utc":now(),"boundary":bnd,"consumer_authority":"NONE"})
     if not hard: raise RuntimeError("Kickest staging QA failed")
-    return {"matchday_id":mid,"players":len(players),"coaches":len(coaches),"boundary":bnd}
+    return {"matchday_id":mid,"players":len(players),"coaches":len(coaches),"roster_preview_captured":include_roster,"boundary":bnd}
 
 def gh_json(url: str) -> Any:
     req=urllib.request.Request(url,headers={"Accept":"application/vnd.github+json","User-Agent":f"KickestOps/{VERSION}"})
@@ -293,7 +296,7 @@ def main() -> int:
     if mode=="auto": mode="live-turn" if state=="LIVE_TURN" else "pre-gw"
     out=Path(a.output_dir).resolve(); cache=Path(a.cache_dir).resolve(); out.mkdir(parents=True,exist_ok=True); cache.mkdir(parents=True,exist_ok=True)
     result={"orchestrator_version":VERSION,"generated_at_utc":now(),"mode_requested":a.mode,"mode_executed":mode,"season":a.season,"gw":gw,"detected_state":state,"authority":"DEVELOP_STAGING_NO_RUNTIME_AUTHORITY"}
-    if mode in ("pre-gw","live-turn"): result["kickest"]=acquire_kickest(out/f"kickest_GW{gw:02d}",a.season,gw,a.horizon_gws)
+    if mode in ("pre-gw","live-turn"): result["kickest"]=acquire_kickest(out/f"kickest_GW{gw:02d}",a.season,gw,a.horizon_gws,include_roster=(mode=="live-turn"))
     if mode in ("pre-gw","opta"): result["opta"]=acquire_opta(out,cache,a.season,gw,a.horizon_gws)
     result["next_boundary"]="governed CommonDB/boundary materialization -> QA/register"; write_json(out/"AUTO_ACQUISITION_RUN.json",result); print(json.dumps(result,ensure_ascii=False,indent=2)); return 0
 
