@@ -1,0 +1,6 @@
+{
+  "mode": "auto",
+  "gw": "auto",
+  "horizon_gws": 3,
+  "requested_by": "manual"
+}
