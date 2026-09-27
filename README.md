@@ -1,45 +1,64 @@
 # KickestOps automated acquisition — DEVELOPMENT
 
-Single operational entrypoint: `kickestops_auto_acquire.py`.
+Entry point: `kickestops_auto_acquire.py`.
 
-## Trigger policy
+## Come si avvia
 
-There is **no scheduled execution**.
+**Nessuno schedule. Nessun cron.**
 
-Acquisition starts only in one of two explicit ways:
+L'acquisizione parte solo:
 
-1. GitHub → Actions → `KickestOps Auto Acquisition` → `Run workflow`;
-2. when you tell ChatGPT/KickestOps to refresh the data, it updates `.kickestops/run-request.json`; that commit is the trigger.
+1. manualmente da GitHub Actions; oppure
+2. quando KickestOps modifica `.kickestops/run-request.json` dopo una richiesta esplicita dell'utente.
 
-Ordinary commits do not run acquisition. The workflow listens only to the explicit run-request file.
+Gli altri commit non avviano l'acquisizione.
 
-## Required GitHub secret
+## Modalità normale: FAST
 
-Create repository secret `KICKEST_BEARER` containing the current Kickest bearer token.
+Usare:
 
-This is intentionally not stored in the repository.
+- `mode: auto`
+- `gw: auto`
+- `horizon_gws: 3`
 
-## Recommended request
+Il percorso normale è intenzionalmente leggero:
 
-- `mode`: `auto`
-- `gw`: `auto`
-- `horizon_gws`: `3`
+- rileva la GW con poche chiamate Kickest;
+- acquisisce schedule e mercato Kickest;
+- acquisisce roster preview solo durante LIVE_TURN;
+- per Opta aggiorna solo `opta_fixtures.parquet` e costruisce l'orizzonte;
+- **non** ricostruisce l'H5 pesante.
 
-The active GW is resolved from the official Kickest schedule when `gw=auto`.
+## Modalità disponibili
 
-## Modes
+- `auto` — percorso normale/rapido; sceglie PRE-GW o LIVE-TURN.
+- `pre-gw` — Kickest + Opta fixture horizon rapido.
+- `live-turn` — Kickest point-in-time + roster preview.
+- `opta` — solo Opta fixture horizon rapido.
+- `opta-full` — rebuild Opta/H5 completo; esplicito, pesante, non usato da `auto`.
 
-- `auto`: detects the current Kickest state and chooses PRE-GW or LIVE-TURN acquisition.
-- `pre-gw`: Kickest full-market capture plus Opta/Pannadata frozen-origin horizon and H5 package.
-- `live-turn`: Kickest schedule/full-market plus roster-preview Turn state.
-- `opta`: Opta/Pannadata acquisition only.
+## Secret richiesto
 
-## Outputs and authority
+Repository secret:
 
-Each run uploads an immutable GitHub Actions artifact.
+`KICKEST_BEARER`
 
-Outputs remain `DEVELOP/STAGING`. Acquisition does not silently promote or register source data as runtime-authoritative.
+Il bearer non deve essere salvato nei file del repository.
 
-Governed next boundary:
+## Affidabilità
+
+- retry sui download;
+- resume dei download parziali nello stesso run;
+- timeout del workflow;
+- manifest scritto anche in caso di errore;
+- artifact di staging caricato a fine run;
+- nessun fallback silenzioso;
+- nessuna promozione automatica a runtime authority.
+
+## Authority
+
+Gli output restano `DEVELOP/STAGING`.
+
+Passaggio successivo governato:
 
 `STAGING -> CommonDB/boundary materialization -> QA/register -> Common Data Path`
