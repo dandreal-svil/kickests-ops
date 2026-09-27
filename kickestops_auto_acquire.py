@@ -238,6 +238,89 @@ def season_match(v: Any, season: str) -> bool:
         return norm(s)==norm(season)
     return numeric==te
 
+
+def parse_match_dates(series):
+    """Robust Pannadata fixture-date parser from the reviewed horizon collector."""
+    import datetime as _dt
+    import pandas as pd
+
+    def unwrap(v):
+        if v is None:
+            return None
+        as_py=getattr(v,"as_py",None)
+        if callable(as_py):
+            try:
+                v=as_py()
+            except Exception:
+                pass
+        if isinstance(v,(bytes,bytearray,memoryview)):
+            try:
+                return bytes(v).decode("utf-8")
+            except Exception:
+                return bytes(v).decode("utf-8",errors="replace")
+        return v
+
+    def one(v):
+        v=unwrap(v)
+        if v is None:
+            return pd.NaT
+        try:
+            if pd.isna(v):
+                return pd.NaT
+        except Exception:
+            pass
+        if isinstance(v,pd.Timestamp):
+            return v.tz_localize("UTC") if v.tzinfo is None else v.tz_convert("UTC")
+        if isinstance(v,_dt.datetime):
+            x=pd.Timestamp(v)
+            return x.tz_localize("UTC") if x.tzinfo is None else x.tz_convert("UTC")
+        if isinstance(v,_dt.date):
+            return pd.Timestamp(v,tz="UTC")
+        if isinstance(v,(int,float)) and not isinstance(v,bool):
+            n=int(v); a=abs(n)
+            if 19000101<=a<=22001231:
+                try:
+                    return pd.Timestamp(_dt.datetime.strptime(str(n),"%Y%m%d"),tz="UTC")
+                except Exception:
+                    pass
+            try:
+                if a>=10**17: return pd.to_datetime(n,unit="ns",utc=True)
+                if a>=10**14: return pd.to_datetime(n,unit="us",utc=True)
+                if a>=10**11: return pd.to_datetime(n,unit="ms",utc=True)
+                if a>=10**8: return pd.to_datetime(n,unit="s",utc=True)
+                if 10000<=a<=100000:
+                    return pd.Timestamp("1970-01-01",tz="UTC")+pd.to_timedelta(n,unit="D")
+            except Exception:
+                return pd.NaT
+        s=str(v).strip()
+        if not s:
+            return pd.NaT
+        if re.fullmatch(r"\d{4}-\d{2}-\d{2}Z",s):
+            s=s[:10]+"T00:00:00Z"
+        if re.fullmatch(r"[+-]?\d+(?:\.0+)?",s):
+            try:
+                return one(int(float(s)))
+            except Exception:
+                pass
+        iso=s.replace("Z","+00:00") if s.endswith(("Z","z")) else s
+        try:
+            x=pd.Timestamp(_dt.datetime.fromisoformat(iso))
+            return x.tz_localize("UTC") if x.tzinfo is None else x.tz_convert("UTC")
+        except Exception:
+            pass
+        try:
+            return pd.Timestamp(_dt.date.fromisoformat(s),tz="UTC")
+        except Exception:
+            pass
+        try:
+            return pd.to_datetime(s,utc=True,errors="coerce",format="mixed")
+        except TypeError:
+            return pd.to_datetime(s,utc=True,errors="coerce")
+        except Exception:
+            return pd.NaT
+
+    return pd.to_datetime(series.map(one),utc=True,errors="coerce")
+
 def opta_fixture_context(fixtures: Path, season: str, target_gw: int):
     import pandas as pd
     df=pd.read_parquet(fixtures); cols=df.columns
@@ -257,7 +340,7 @@ def opta_fixture_context(fixtures: Path, season: str, target_gw: int):
         parsed=pd.to_numeric(df[gc],errors="coerce"); df["_gw"]=parsed
     else:
         if not dc: raise RuntimeError("No GW and no date column for chronology derivation")
-        df["_dt"]=pd.to_datetime(df[dc],utc=True,errors="coerce")
+        df["_dt"]=parse_match_dates(df[dc])
         if df["_dt"].isna().any(): raise RuntimeError("Unparseable Opta fixture dates")
         df=df.sort_values(["_dt",mc],kind="stable").reset_index(drop=True); teams=set(df[hc].astype(str))|set(df[ac].astype(str)); m=len(teams)//2
         if len(teams)!=20 or m!=10: raise RuntimeError(f"Expected 20 teams/10 matches, got {len(teams)}/{m}")
