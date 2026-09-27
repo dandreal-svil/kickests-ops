@@ -1,0 +1,70 @@
+name: KickestOps Canonical D168 Acquisition
+
+on:
+  workflow_dispatch:
+    inputs:
+      gw:
+        description: "GW"
+        required: true
+        default: "5"
+  push:
+    paths:
+      - ".kickestops/canonical-request.json"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: kickestops-canonical-d168
+  cancel-in-progress: false
+
+jobs:
+  acquire:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: requirements-d168.txt
+
+      - name: Verify canonical collector hash
+        run: |
+          echo "3c5afeeb29c6f16c95de20901ea5285810cfb1e8cc769341934b2f47aeff490e  fantaops_kickest_live_turn_state_v0_1_5.py" | sha256sum -c -
+
+      - name: Install dependency
+        run: python -m pip install -r requirements-d168.txt
+
+      - name: Resolve request
+        id: req
+        shell: bash
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            gw="${{ inputs.gw }}"
+          else
+            gw="$(jq -r '.gw' .kickestops/canonical-request.json)"
+          fi
+          echo "gw=$gw" >> "$GITHUB_OUTPUT"
+
+      - name: Run canonical D-168 collector
+        env:
+          KICKEST_BEARER: ${{ secrets.KICKEST_BEARER }}
+          PYTHONUNBUFFERED: "1"
+        run: |
+          python fantaops_kickest_live_turn_state_v0_1_5.py \
+            --season 2026-27 \
+            --gw "${{ steps.req.outputs.gw }}" \
+            --entries .kickestops/entries-abc-gw05.json \
+            --out canonical_d168_gw05
+
+      - name: Upload canonical capture
+        uses: actions/upload-artifact@v4
+        with:
+          name: canonical-d168-gw05-${{ github.run_id }}
+          path: canonical_d168_gw05/
+          if-no-files-found: error
+          retention-days: 30
+          compression-level: 1
