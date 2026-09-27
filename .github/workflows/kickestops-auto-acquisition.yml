@@ -62,30 +62,41 @@ jobs:
         shell: bash
         run: |
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            echo "mode=${{ inputs.mode }}" >> "$GITHUB_OUTPUT"
-            echo "gw=${{ inputs.gw }}" >> "$GITHUB_OUTPUT"
-            echo "horizon=${{ inputs.horizon_gws }}" >> "$GITHUB_OUTPUT"
+            mode="${{ inputs.mode }}"
+            gw="${{ inputs.gw }}"
+            horizon="${{ inputs.horizon_gws }}"
           else
-            python - <<'PY'
-          import json, os
-          with open(".kickestops/run-request.json", encoding="utf-8") as f:
-              r=json.load(f)
-          mode=str(r.get("mode","auto"))
-          gw=str(r.get("gw","auto"))
-          horizon=str(r.get("horizon_gws",3))
-          if mode not in {"auto","pre-gw","live-turn","opta"}:
-              raise SystemExit(f"invalid mode: {mode}")
-          if gw != "auto" and not (gw.isdigit() and 1 <= int(gw) <= 38):
-              raise SystemExit(f"invalid gw: {gw}")
-          if not (horizon.isdigit() and 1 <= int(horizon) <= 9):
-              raise SystemExit(f"invalid horizon_gws: {horizon}")
-          out=os.environ["GITHUB_OUTPUT"]
-          with open(out,"a",encoding="utf-8") as g:
-              g.write(f"mode={mode}\n")
-              g.write(f"gw={gw}\n")
-              g.write(f"horizon={horizon}\n")
-          PY
+            mode="$(jq -r '.mode // "auto"' .kickestops/run-request.json)"
+            gw="$(jq -r '.gw // "auto" | tostring' .kickestops/run-request.json)"
+            horizon="$(jq -r '.horizon_gws // 3 | tostring' .kickestops/run-request.json)"
           fi
+
+          case "$mode" in
+            auto|pre-gw|live-turn|opta) ;;
+            *) echo "Invalid mode: $mode" >&2; exit 2 ;;
+          esac
+
+          if [ "$gw" != "auto" ]; then
+            case "$gw" in
+              ''|*[!0-9]*) echo "Invalid gw: $gw" >&2; exit 2 ;;
+            esac
+            if [ "$gw" -lt 1 ] || [ "$gw" -gt 38 ]; then
+              echo "Invalid gw: $gw" >&2
+              exit 2
+            fi
+          fi
+
+          case "$horizon" in
+            ''|*[!0-9]*) echo "Invalid horizon_gws: $horizon" >&2; exit 2 ;;
+          esac
+          if [ "$horizon" -lt 1 ] || [ "$horizon" -gt 9 ]; then
+            echo "Invalid horizon_gws: $horizon" >&2
+            exit 2
+          fi
+
+          echo "mode=$mode" >> "$GITHUB_OUTPUT"
+          echo "gw=$gw" >> "$GITHUB_OUTPUT"
+          echo "horizon=$horizon" >> "$GITHUB_OUTPUT"
 
       - name: Verify unified entrypoint
         run: python kickestops_auto_acquire.py inspect
