@@ -1,7 +1,7 @@
 {
-  "mode": "auto",
-  "gw": "auto",
+  "mode": "live-turn",
+  "gw": 5,
   "horizon_gws": 3,
   "requested_by": "ChatGPT/KickestOps",
-  "request_id": "public-fast-refresh-2026-09-27"
+  "request_id": "recover-gw05-ab-final"
 }
