@@ -225,7 +225,7 @@ def season_match(v: Any, season: str) -> bool:
         te+=100
 
     s=str(v).strip()
-    m=re.search(r"(\d{4})\D+(\d{2}|\d{4})",s)
+    m=re.search(r"(\d{4})\D+(\d{4}|\d{2})",s)
     if m:
         vs=int(m.group(1)); vr=m.group(2)
         ve=int(vr) if len(vr)==4 else (vs//100)*100+int(vr)
