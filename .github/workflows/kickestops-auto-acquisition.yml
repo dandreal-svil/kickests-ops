@@ -1,0 +1,76 @@
+name: KickestOps Auto Acquisition
+
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "auto | pre-gw | live-turn | opta"
+        required: true
+        default: "auto"
+        type: choice
+        options: [auto, pre-gw, live-turn, opta]
+      gw:
+        description: "GW number or auto"
+        required: true
+        default: "auto"
+      horizon_gws:
+        description: "Frozen-origin horizon (1..9)"
+        required: true
+        default: "3"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: kickestops-acquisition
+  cancel-in-progress: false
+
+jobs:
+  acquire:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      KICKEST_BEARER: ${{ secrets.KICKEST_BEARER }}
+      PYTHONUNBUFFERED: "1"
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install acquisition dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements-acquisition.txt
+
+      - name: Restore acquisition cache
+        uses: actions/cache@v4
+        with:
+          path: .kickestops-cache
+          key: kickestops-acquisition-${{ runner.os }}-${{ github.run_id }}
+          restore-keys: |
+            kickestops-acquisition-${{ runner.os }}-
+
+      - name: Verify bundled implementation hashes
+        run: python kickestops_auto_acquire.py inspect
+
+      - name: Run unified acquisition
+        run: |
+          python kickestops_auto_acquire.py "${{ inputs.mode }}" \
+            --gw "${{ inputs.gw }}" \
+            --season "2026-27" \
+            --horizon-gws "${{ inputs.horizon_gws }}" \
+            --output-dir artifacts \
+            --cache-dir .kickestops-cache
+
+      - name: Upload immutable staging bundle
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: kickestops-acquisition-${{ github.run_id }}
+          path: artifacts/
+          if-no-files-found: warn
+          retention-days: 30
