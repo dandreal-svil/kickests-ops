@@ -61,6 +61,7 @@ jobs:
             --out canonical_d168_gw05
 
       - name: Upload canonical capture
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: canonical-d168-gw05-${{ github.run_id }}
