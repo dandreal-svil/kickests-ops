@@ -185,8 +185,13 @@ def acquire_kickest(out: Path, season: str, gw: int, horizon: int, include_roste
     return {"matchday_id":mid,"players":len(players),"coaches":len(coaches),"roster_preview_captured":include_roster,"boundary":bnd}
 
 def gh_json(url: str) -> Any:
-    req=urllib.request.Request(url,headers={"Accept":"application/vnd.github+json","User-Agent":f"KickestOps/{VERSION}"})
-    with urllib.request.urlopen(req,timeout=120) as r: return json.load(r)
+    headers={"Accept":"application/vnd.github+json","User-Agent":f"KickestOps/{VERSION}","X-GitHub-Api-Version":"2022-11-28"}
+    gh_token=(os.getenv("GITHUB_TOKEN") or "").strip()
+    if gh_token:
+        headers["Authorization"]=f"Bearer {gh_token}"
+    req=urllib.request.Request(url,headers=headers)
+    with urllib.request.urlopen(req,timeout=120) as r:
+        return json.load(r)
 
 def release_assets() -> dict[str,dict[str,Any]]:
     rel=gh_json(f"https://api.github.com/repos/{PANNA_REPO}/releases/tags/{PANNA_TAG}")
