@@ -17,7 +17,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable
 
-VERSION = "0.2.0-dev"
+VERSION = "0.3.0-dev"
 API_ROOT = "https://fantaking-api.dunkest.com/api/v1"
 ALLOWED_API_HOST = "fantaking-api.dunkest.com"
 SCHEDULE_ID = 45
@@ -34,7 +34,7 @@ FINAL = {"played","completed","finished","final","ft","fulltime","complete","end
 LIVE = {"live","in_progress","in-progress","playing"}
 PANNA_REPO = "peteowen1/pannadata"
 PANNA_TAG = "opta-latest"
-PANNA_ASSETS = (
+PANNA_FULL_ASSETS = (
     "opta_fixtures.parquet", "opta_player_stats.parquet", "opta_lineups.parquet",
     "opta_match_stats.parquet", "opta_shots.parquet", "opta_shot_events.parquet", "opta_events.parquet",
 )
@@ -92,7 +92,9 @@ def schedule_number(obj: dict[str,Any]) -> int|None:
 def resolve_matchday(bearer: str, season: str, gw: int) -> tuple[int,dict[str,Any],str]:
     if season not in MATCHDAY_ANCHOR: raise RuntimeError(f"No matchday anchor for {season}")
     agw, amid=MATCHDAY_ANCHOR[season]; candidate=amid+(gw-agw)
-    for delta in [0]+[x for d in range(1,41) for x in (-d,d)]:
+    # The season anchor is validated on every hit. Keep fallback bounded so a
+    # bad/missing GW fails quickly instead of spraying the API with requests.
+    for delta in [0]+[x for d in range(1,6) for x in (-d,d)]:
         mid=candidate+delta
         if mid<=0: continue
         try: obj,cap=api_json(f"{API_ROOT}/schedules/{SCHEDULE_ID}/matchdays/{mid}",bearer,1)
@@ -186,7 +188,7 @@ def acquire_kickest(out: Path, season: str, gw: int, horizon: int, include_roste
 
 def gh_json(url: str) -> Any:
     headers={"Accept":"application/vnd.github+json","User-Agent":f"KickestOps/{VERSION}","X-GitHub-Api-Version":"2022-11-28"}
-    gh_token=(os.getenv("GITHUB_TOKEN") or "").strip()
+    gh_token=(os.getenv("GH_TOKEN") or os.getenv("GITHUB_TOKEN") or "").strip()
     if gh_token:
         headers["Authorization"]=f"Bearer {gh_token}"
     req=urllib.request.Request(url,headers=headers)
@@ -197,12 +199,39 @@ def release_assets() -> dict[str,dict[str,Any]]:
     rel=gh_json(f"https://api.github.com/repos/{PANNA_REPO}/releases/tags/{PANNA_TAG}")
     return {a["name"]:a for a in rel.get("assets",[]) if a.get("name") and a.get("browser_download_url")}
 
-def download(url: str, path: Path, expected_size: int|None=None):
-    path.parent.mkdir(parents=True,exist_ok=True); tmp=path.with_suffix(path.suffix+".part")
-    req=urllib.request.Request(url,headers={"User-Agent":f"KickestOps/{VERSION}"})
-    with urllib.request.urlopen(req,timeout=300) as r, tmp.open("wb") as f: shutil.copyfileobj(r,f)
-    if expected_size and tmp.stat().st_size!=expected_size: tmp.unlink(missing_ok=True); raise RuntimeError(f"Size mismatch for {path.name}")
-    tmp.replace(path)
+def asset_url(name: str) -> str:
+    return f"https://github.com/{PANNA_REPO}/releases/download/{PANNA_TAG}/{name}"
+
+def download(url: str, path: Path, expected_size: int|None=None, retries: int=3):
+    """Download with retry and in-run resume; never discard a valid final file."""
+    path.parent.mkdir(parents=True,exist_ok=True)
+    if path.is_file() and (not expected_size or path.stat().st_size==expected_size):
+        return
+    tmp=path.with_suffix(path.suffix+".part")
+    last=None
+    for attempt in range(retries+1):
+        try:
+            have=tmp.stat().st_size if tmp.exists() else 0
+            headers={"User-Agent":f"KickestOps/{VERSION}"}
+            if have:
+                headers["Range"]=f"bytes={have}-"
+            req=urllib.request.Request(url,headers=headers)
+            with urllib.request.urlopen(req,timeout=180) as r:
+                status=getattr(r,"status",200)
+                append=have>0 and status==206
+                mode="ab" if append else "wb"
+                with tmp.open(mode) as fh:
+                    shutil.copyfileobj(r,fh,1024*1024)
+            if expected_size and tmp.stat().st_size!=expected_size:
+                raise RuntimeError(f"Size mismatch for {path.name}: {tmp.stat().st_size} != {expected_size}")
+            tmp.replace(path)
+            return
+        except Exception as exc:
+            last=exc
+            if attempt>=retries:
+                break
+            time.sleep(min(5,0.75*(2**attempt)))
+    raise RuntimeError(f"Download failed for {path.name}: {last}")
 
 def norm(v: Any) -> str: return re.sub(r"[^a-z0-9]+","",str(v).lower())
 
@@ -355,67 +384,256 @@ def opta_fixture_context(fixtures: Path, season: str, target_gw: int):
     if stc and target[stc].astype(str).map(lambda x:norm(x) in {norm(s) for s in FINAL}).any(): raise RuntimeError("Target Opta GW already contains final fixtures")
     return df,target,prior,{"season":sc,"league":lc,"match":mc,"home":hc,"away":ac,"gw":gc,"date":dc,"status":stc}
 
-def acquire_opta(out: Path, cache: Path, season: str, gw: int, horizon: int) -> dict[str,Any]:
+def acquire_opta_fast(out: Path, cache: Path, season: str, gw: int, horizon: int) -> dict[str,Any]:
+    """Fast PRE-GW Opta refresh: fixtures only (~10 MB), no heavyweight H5 rebuild."""
+    fixture=cache/PANNA_TAG/"opta_fixtures.parquet"
+    # The rolling opta-latest tag may replace the asset in place, so refresh this
+    # small file every requested run. This avoids stale-cache ambiguity.
+    fixture.unlink(missing_ok=True)
+    download(asset_url("opta_fixtures.parquet"),fixture,retries=3)
+
+    allfix,target,prior,col=opta_fixture_context(fixture,season,gw)
+    horizon_df=allfix[(allfix["_gw"]>=gw)&(allfix["_gw"]<gw+horizon)].copy()
+    if horizon_df["_gw"].nunique()!=horizon:
+        raise RuntimeError("Incomplete Opta fixture horizon")
+
+    hdir=out/"opta_horizon"
+    hdir.mkdir(parents=True,exist_ok=True)
+    csvp=hdir/f"opta_live_match_snapshot_{season}_GW{gw:02d}_H{horizon}_DEV.csv"
+    keep=[col["match"],col["home"],col["away"]]+([col["date"]] if col["date"] else [])
+    exp=horizon_df[["_gw"]+keep].rename(columns={
+        "_gw":"gw",
+        col["match"]:"opta_match_id",
+        col["home"]:"opta_home_team_id",
+        col["away"]:"opta_away_team_id",
+    })
+    exp.insert(0,"season",season)
+    exp.to_csv(csvp,index=False)
+    manifest={
+        "status":"DEVELOPMENT_STAGING_NO_RUNTIME_AUTHORITY",
+        "profile":"FAST_INCREMENTAL",
+        "season":season,
+        "origin_gw":gw,
+        "target_gws":list(range(gw,gw+horizon)),
+        "source_repo":PANNA_REPO,
+        "source_tag":PANNA_TAG,
+        "fixture_asset":{"path":str(fixture),"size":fixture.stat().st_size,"sha256":sha256(fixture)},
+        "fixture_horizon":{"path":str(csvp),"rows":len(exp),"sha256":sha256(csvp)},
+        "target_match_ids":len(set(target[col["match"]].astype(str))),
+        "prior_match_ids":len(set(prior[col["match"]].astype(str))),
+        "h5_rebuilt":False,
+        "promotion_state":"STAGING_NOT_RUNTIME_ELIGIBLE",
+    }
+    write_json(hdir/"MANIFEST.json",manifest)
+    return manifest
+
+def acquire_opta_full(out: Path, cache: Path, season: str, gw: int, horizon: int) -> dict[str,Any]:
+    """Explicit heavyweight rebuild. Never called by normal auto refresh."""
     import pandas as pd, h5py
-    assets=release_assets(); missing=[n for n in PANNA_ASSETS if n not in assets]
-    if missing: raise RuntimeError(f"Missing Pannadata assets: {missing}")
+    assets=release_assets()
+    missing=[n for n in PANNA_FULL_ASSETS if n not in assets]
+    if missing:
+        raise RuntimeError(f"Missing Pannadata assets: {missing}")
+
     paths={}
-    for name in PANNA_ASSETS:
-        a=assets[name]; p=cache/PANNA_TAG/name
-        if not p.is_file() or (a.get("size") and p.stat().st_size!=int(a["size"])): download(a["browser_download_url"],p,int(a.get("size") or 0) or None)
+    for name in PANNA_FULL_ASSETS:
+        a=assets[name]
+        p=cache/PANNA_TAG/name
+        if not p.is_file() or (a.get("size") and p.stat().st_size!=int(a["size"])):
+            download(a["browser_download_url"],p,int(a.get("size") or 0) or None)
         paths[name]=p
-    allfix,target,prior,c=opta_fixture_context(paths["opta_fixtures.parquet"],season,gw); horizon_df=allfix[(allfix["_gw"]>=gw)&(allfix["_gw"]<gw+horizon)].copy()
-    if horizon_df["_gw"].nunique()!=horizon: raise RuntimeError("Incomplete Opta fixture horizon")
-    hdir=out/"opta_horizon"; hdir.mkdir(parents=True,exist_ok=True); csvp=hdir/f"opta_live_match_snapshot_{season}_GW{gw:02d}_H{horizon}_DEV.csv"
-    keep=[c["match"],c["home"],c["away"]]+([c["date"]] if c["date"] else []); exp=horizon_df[["_gw"]+keep].rename(columns={"_gw":"gw",c["match"]:"opta_match_id",c["home"]:"opta_home_team_id",c["away"]:"opta_away_team_id"}); exp.insert(0,"season",season); exp.to_csv(csvp,index=False)
-    prior_ids=set(prior[c["match"]].astype(str)); target_ids=set(target[c["match"]].astype(str)); h5dir=out/"opta_h5"; h5dir.mkdir(parents=True,exist_ok=True); h5p=h5dir/f"kickestops_opta_raw_{season}_pre_GW{gw:02d}.h5"
+
+    allfix,target,prior,col=opta_fixture_context(paths["opta_fixtures.parquet"],season,gw)
+    horizon_df=allfix[(allfix["_gw"]>=gw)&(allfix["_gw"]<gw+horizon)].copy()
+    if horizon_df["_gw"].nunique()!=horizon:
+        raise RuntimeError("Incomplete Opta fixture horizon")
+
+    hdir=out/"opta_horizon"
+    hdir.mkdir(parents=True,exist_ok=True)
+    csvp=hdir/f"opta_live_match_snapshot_{season}_GW{gw:02d}_H{horizon}_DEV.csv"
+    keep=[col["match"],col["home"],col["away"]]+([col["date"]] if col["date"] else [])
+    exp=horizon_df[["_gw"]+keep].rename(columns={
+        "_gw":"gw",
+        col["match"]:"opta_match_id",
+        col["home"]:"opta_home_team_id",
+        col["away"]:"opta_away_team_id",
+    })
+    exp.insert(0,"season",season)
+    exp.to_csv(csvp,index=False)
+
+    prior_ids=set(prior[col["match"]].astype(str))
+    target_ids=set(target[col["match"]].astype(str))
+    h5dir=out/"opta_h5"
+    h5dir.mkdir(parents=True,exist_ok=True)
+    h5p=h5dir/f"kickestops_opta_raw_{season}_pre_GW{gw:02d}.h5"
+
     with h5py.File(h5p,"w") as h5:
-        h5.attrs.update({"format_id":"KICKESTOPS_OPTA_RAW_H5_BRIDGE","format_version":"1.0","bridge_version":VERSION,"canonical_status":"LOCAL_RAW_NON_CANONICAL","generated_at_utc":now(),"mode":"live","league":"Serie_A","season":season,"next_gw":gw})
+        h5.attrs.update({
+            "format_id":"KICKESTOPS_OPTA_RAW_H5_BRIDGE",
+            "format_version":"1.0",
+            "bridge_version":VERSION,
+            "canonical_status":"LOCAL_RAW_NON_CANONICAL",
+            "generated_at_utc":now(),
+            "mode":"live",
+            "league":"Serie_A",
+            "season":season,
+            "next_gw":gw,
+        })
         tables=h5.create_group("tables")
         for name,p in paths.items():
-            df=pd.read_parquet(p); mc=detect(df.columns,["match_id","opta_match_id","fixture_id"])
+            df=pd.read_parquet(p)
+            mc=detect(df.columns,["match_id","opta_match_id","fixture_id"])
             if name=="opta_fixtures.parquet":
                 selected=pd.concat([target.assign(_scope="TARGET_GW"),prior.assign(_scope="PRIOR")],ignore_index=True)
             elif mc:
                 selected=df[df[mc].astype(str).isin(prior_ids)].copy()
             else:
-                sc=detect(df.columns,["season","season_name","season_end_year"]); lc=detect(df.columns,["league","competition","competition_name"])
-                if not sc or not lc: continue
-                selected=df[df[sc].map(lambda x:season_match(x,season)) & df[lc].map(lambda x:norm(x) in {norm("Serie_A"),norm("ITA")})].copy()
+                sc=detect(df.columns,["season","season_name","season_end_year"])
+                lc=detect(df.columns,["league","competition","competition_name"])
+                if not sc or not lc:
+                    continue
+                selected=df[
+                    df[sc].map(lambda x:season_match(x,season))
+                    & df[lc].map(lambda x:norm(x) in {norm("Serie_A"),norm("ITA")})
+                ].copy()
             key=name.removeprefix("opta_").removesuffix(".parquet")
-            grp=tables.create_group(key); payload=selected.to_json(orient="records",lines=True,date_format="iso").encode("utf-8")
+            grp=tables.create_group(key)
+            payload=selected.to_json(orient="records",lines=True,date_format="iso").encode("utf-8")
             import numpy as np
             grp.create_dataset("jsonl_utf8",data=np.frombuffer(payload,dtype=np.uint8),compression="gzip")
-            grp.attrs["source_asset"]=name; grp.attrs["row_count"]=len(selected); grp.attrs["columns_json"]=json.dumps(list(selected.columns))
-    manifest={"status":"DEVELOPMENT_STAGING_NO_RUNTIME_AUTHORITY","season":season,"origin_gw":gw,"target_gws":list(range(gw,gw+horizon)),"source_repo":PANNA_REPO,"source_tag":PANNA_TAG,"fixture_horizon":{"path":str(csvp),"rows":len(exp),"sha256":sha256(csvp)},"h5":{"path":str(h5p),"sha256":sha256(h5p)},"target_match_ids":len(target_ids),"prior_match_ids":len(prior_ids),"promotion_state":"STAGING_NOT_RUNTIME_ELIGIBLE"}
-    write_json(h5dir/(h5p.stem+".manifest.json"),manifest); return manifest
+            grp.attrs["source_asset"]=name
+            grp.attrs["row_count"]=len(selected)
+            grp.attrs["columns_json"]=json.dumps(list(selected.columns))
+
+    manifest={
+        "status":"DEVELOPMENT_STAGING_NO_RUNTIME_AUTHORITY",
+        "profile":"FULL_H5_REBUILD",
+        "season":season,
+        "origin_gw":gw,
+        "target_gws":list(range(gw,gw+horizon)),
+        "source_repo":PANNA_REPO,
+        "source_tag":PANNA_TAG,
+        "fixture_horizon":{"path":str(csvp),"rows":len(exp),"sha256":sha256(csvp)},
+        "h5":{"path":str(h5p),"sha256":sha256(h5p)},
+        "target_match_ids":len(target_ids),
+        "prior_match_ids":len(prior_ids),
+        "h5_rebuilt":True,
+        "promotion_state":"STAGING_NOT_RUNTIME_ELIGIBLE",
+    }
+    write_json(h5dir/(h5p.stem+".manifest.json"),manifest)
+    return manifest
+
+def _gw_state(bearer: str, season: str, gw: int) -> tuple[str,int,dict[str,Any]]:
+    mid,obj,_=resolve_matchday(bearer,season,gw)
+    _,rs=schedule_rows(obj)
+    states=[x["state"] for x in rs.values()]
+    state="LIVE_TURN" if "LIVE" in states else "COMPLETE" if states and all(s=="COMPLETE" for s in states) else "PRE_GW_FULL_MARKET"
+    return state,mid,obj
 
 def auto_gw(season: str) -> tuple[int,str]:
-    b=token(); obs=[]
-    for gw in range(1,39):
-        try: _,obj,_=resolve_matchday(b,season,gw)
-        except Exception: continue
-        _,rs=schedule_rows(obj); states=[x["state"] for x in rs.values()]
-        obs.append((gw,"LIVE_TURN" if "LIVE" in states else "COMPLETE" if states and all(s=="COMPLETE" for s in states) else "PRE_GW_FULL_MARKET"))
-    live=[x for x in obs if x[1]=="LIVE_TURN"]
-    if live: return live[0]
-    open_=[x for x in obs if x[1]!="COMPLETE"]
-    if open_: return open_[0]
+    """Find first non-complete GW with O(log N) schedule calls, then verify neighbours."""
+    b=token()
+    lo,hi=1,38
+    cache={}
+    def get(g):
+        if g not in cache:
+            cache[g]=_gw_state(b,season,g)
+        return cache[g]
+
+    while lo<hi:
+        mid=(lo+hi)//2
+        state,_,_=get(mid)
+        if state=="COMPLETE":
+            lo=mid+1
+        else:
+            hi=mid
+
+    candidate=lo
+    # A live neighbour takes precedence. Otherwise use the first non-complete GW.
+    for g in range(max(1,candidate-1),min(38,candidate+1)+1):
+        state,_,_=get(g)
+        if state=="LIVE_TURN":
+            return g,state
+    state,_,_=get(candidate)
+    if state!="COMPLETE":
+        return candidate,state
+    if candidate==38:
+        return 38,state
     raise RuntimeError("Cannot resolve active GW")
 
 def main() -> int:
-    ap=argparse.ArgumentParser(); ap.add_argument("mode",choices=("auto","pre-gw","live-turn","opta","inspect")); ap.add_argument("--gw",default="auto"); ap.add_argument("--season",default="2026-27"); ap.add_argument("--horizon-gws",type=int,default=3); ap.add_argument("--output-dir",default="artifacts"); ap.add_argument("--cache-dir",default=".kickestops-cache"); a=ap.parse_args()
-    if a.mode=="inspect": print(json.dumps({"version":VERSION,"modes":["auto","pre-gw","live-turn","opta"],"scheduled":False},indent=2)); return 0
-    if not 1<=a.horizon_gws<=9: raise RuntimeError("--horizon-gws must be 1..9")
-    if a.gw=="auto": gw,state=auto_gw(a.season)
-    else: gw=int(a.gw); state="EXPLICIT_GW"
-    mode=a.mode
-    if mode=="auto": mode="live-turn" if state=="LIVE_TURN" else "pre-gw"
-    out=Path(a.output_dir).resolve(); cache=Path(a.cache_dir).resolve(); out.mkdir(parents=True,exist_ok=True); cache.mkdir(parents=True,exist_ok=True)
-    result={"orchestrator_version":VERSION,"generated_at_utc":now(),"mode_requested":a.mode,"mode_executed":mode,"season":a.season,"gw":gw,"detected_state":state,"authority":"DEVELOP_STAGING_NO_RUNTIME_AUTHORITY"}
-    if mode in ("pre-gw","live-turn"): result["kickest"]=acquire_kickest(out/f"kickest_GW{gw:02d}",a.season,gw,a.horizon_gws,include_roster=(mode=="live-turn"))
-    if mode in ("pre-gw","opta"): result["opta"]=acquire_opta(out,cache,a.season,gw,a.horizon_gws)
-    result["next_boundary"]="governed CommonDB/boundary materialization -> QA/register"; write_json(out/"AUTO_ACQUISITION_RUN.json",result); print(json.dumps(result,ensure_ascii=False,indent=2)); return 0
+    started=time.monotonic()
+    ap=argparse.ArgumentParser()
+    ap.add_argument("mode",choices=("auto","pre-gw","live-turn","opta","opta-full","inspect"))
+    ap.add_argument("--gw",default="auto")
+    ap.add_argument("--season",default="2026-27")
+    ap.add_argument("--horizon-gws",type=int,default=3)
+    ap.add_argument("--output-dir",default="artifacts")
+    ap.add_argument("--cache-dir",default=".kickestops-cache")
+    a=ap.parse_args()
+
+    if a.mode=="inspect":
+        print(json.dumps({
+            "version":VERSION,
+            "modes":["auto","pre-gw","live-turn","opta","opta-full"],
+            "scheduled":False,
+            "default_profile":"FAST_INCREMENTAL",
+            "full_opta_is_explicit_only":True,
+        },indent=2))
+        return 0
+    if not 1<=a.horizon_gws<=9:
+        raise RuntimeError("--horizon-gws must be 1..9")
+
+    out=Path(a.output_dir).resolve()
+    cache=Path(a.cache_dir).resolve()
+    out.mkdir(parents=True,exist_ok=True)
+    cache.mkdir(parents=True,exist_ok=True)
+
+    result={
+        "orchestrator_version":VERSION,
+        "generated_at_utc":now(),
+        "mode_requested":a.mode,
+        "season":a.season,
+        "authority":"DEVELOP_STAGING_NO_RUNTIME_AUTHORITY",
+        "status":"RUNNING",
+    }
+    try:
+        if a.gw=="auto":
+            gw,state=auto_gw(a.season)
+        else:
+            gw=int(a.gw)
+            state="EXPLICIT_GW"
+
+        mode=a.mode
+        if mode=="auto":
+            mode="live-turn" if state=="LIVE_TURN" else "pre-gw"
+
+        result.update({"mode_executed":mode,"gw":gw,"detected_state":state})
+        if mode in ("pre-gw","live-turn"):
+            result["kickest"]=acquire_kickest(
+                out/f"kickest_GW{gw:02d}",
+                a.season,
+                gw,
+                a.horizon_gws,
+                include_roster=(mode=="live-turn"),
+            )
+        if mode in ("pre-gw","opta"):
+            result["opta"]=acquire_opta_fast(out,cache,a.season,gw,a.horizon_gws)
+        elif mode=="opta-full":
+            result["opta"]=acquire_opta_full(out,cache,a.season,gw,a.horizon_gws)
+
+        result["status"]="SUCCESS_STAGING"
+        result["next_boundary"]="governed CommonDB/boundary materialization -> QA/register"
+        return_code=0
+    except Exception as exc:
+        result["status"]="FAILED_STAGING"
+        result["error"]=f"{type(exc).__name__}: {exc}"
+        return_code=2
+    finally:
+        result["elapsed_seconds"]=round(time.monotonic()-started,3)
+        write_json(out/"AUTO_ACQUISITION_RUN.json",result)
+        print(json.dumps(result,ensure_ascii=False,indent=2))
+    return return_code
 
 if __name__=="__main__":
     try: raise SystemExit(main())
