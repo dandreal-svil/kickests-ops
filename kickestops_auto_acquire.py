@@ -208,9 +208,30 @@ def detect(cols: Iterable[str], names: Iterable[str]) -> str|None:
     return None
 
 def season_match(v: Any, season: str) -> bool:
-    m=re.search(r"(\d{4})\D+(\d{2}|\d{4})",str(v)); t=re.match(r"(\d{4})-(\d{2})",season)
-    if not m or not t: return norm(v)==norm(season)
-    s=int(m.group(1)); e=int(m.group(2)); e=e if e>99 else (s//100)*100+e; ts=int(t.group(1)); te=(ts//100)*100+int(t.group(2)); return (s,e)==(ts,te)
+    """Match the season encodings accepted by the original v1.0.6 bridge."""
+    if v is None:
+        return False
+    t=re.fullmatch(r"(\d{4})\s*[-/]\s*(\d{2}|\d{4})",str(season).strip())
+    if not t:
+        return norm(v)==norm(season)
+    ts=int(t.group(1)); rhs=t.group(2)
+    te=int(rhs) if len(rhs)==4 else (ts//100)*100+int(rhs)
+    if te<=ts:
+        te+=100
+
+    s=str(v).strip()
+    m=re.search(r"(\d{4})\D+(\d{2}|\d{4})",s)
+    if m:
+        vs=int(m.group(1)); vr=m.group(2)
+        ve=int(vr) if len(vr)==4 else (vs//100)*100+int(vr)
+        if ve<=vs:
+            ve+=100
+        return (vs,ve)==(ts,te)
+    try:
+        numeric=int(float(s))
+    except (TypeError,ValueError):
+        return norm(s)==norm(season)
+    return numeric==te
 
 def opta_fixture_context(fixtures: Path, season: str, target_gw: int):
     import pandas as pd
@@ -218,7 +239,15 @@ def opta_fixture_context(fixtures: Path, season: str, target_gw: int):
     sc=detect(cols,["season","season_name","season_end_year"]); lc=detect(cols,["competition","competition_name","league"]); mc=detect(cols,["match_id","opta_match_id","fixture_id"]); hc=detect(cols,["home_team_id","homeTeamId","home_team"]); ac=detect(cols,["away_team_id","awayTeamId","away_team"]); gc=detect(cols,["gw","gameweek","matchday","round_number"]); dc=detect(cols,["match_date","date","kickoff","start_time"]); stc=detect(cols,["status","match_status"])
     if not all([sc,lc,mc,hc,ac]): raise RuntimeError(f"Opta fixtures missing required columns; have={list(cols)}")
     df=df[df[sc].map(lambda x:season_match(x,season)) & df[lc].map(lambda x:norm(x) in {norm("Serie_A"),norm("ITA")})].copy()
-    if df.empty: raise RuntimeError("No Serie A fixture rows for requested season")
+    if df.empty:
+        source=pd.read_parquet(fixtures,columns=list(dict.fromkeys([sc,lc])))
+        season_samples=source[sc].dropna().astype(str).drop_duplicates().tail(30).tolist()
+        league_samples=source[lc].dropna().astype(str).drop_duplicates().head(30).tolist()
+        raise RuntimeError(
+            f"No Serie A fixture rows for requested season={season}; "
+            f"season_column={sc} samples={season_samples}; "
+            f"league_column={lc} samples={league_samples}"
+        )
     if gc:
         parsed=pd.to_numeric(df[gc],errors="coerce"); df["_gw"]=parsed
     else:
