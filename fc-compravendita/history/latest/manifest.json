@@ -1,0 +1,39 @@
+{
+  "generated_at_utc": "2026-10-07T07:00:31.820885+00:00",
+  "platform": "ps",
+  "successes": [],
+  "failures": [
+    {
+      "name": "Bradley Barcola",
+      "error": "403 Client Error: Forbidden for url: https://www.futbin.com/27/players?search=Bradley+Barcola"
+    },
+    {
+      "name": "Nico Williams",
+      "error": "403 Client Error: Forbidden for url: https://www.futbin.com/27/players?search=Nico+Williams"
+    },
+    {
+      "name": "Aurelien Tchouameni",
+      "error": "403 Client Error: Forbidden for url: https://www.futbin.com/27/players?search=Aurelien+Tchouameni"
+    },
+    {
+      "name": "Marcus Rashford",
+      "error": "403 Client Error: Forbidden for url: https://www.futbin.com/27/players?search=Marcus+Rashford"
+    },
+    {
+      "name": "Karim Adeyemi",
+      "error": "403 Client Error: Forbidden for url: https://www.futbin.com/27/players?search=Karim+Adeyemi"
+    },
+    {
+      "name": "Marcos Llorente",
+      "error": "403 Client Error: Forbidden for url: https://www.futbin.com/27/players?search=Marcos+Llorente"
+    },
+    {
+      "name": "Frenkie de Jong",
+      "error": "403 Client Error: Forbidden for url: https://www.futbin.com/27/players?search=Frenkie+de+Jong"
+    },
+    {
+      "name": "Selma Bacha",
+      "error": "403 Client Error: Forbidden for url: https://www.futbin.com/27/players?search=Selma+Bacha"
+    }
+  ]
+}
